@@ -2,6 +2,8 @@ import { checkSchema, validationResult } from "express-validator";
 import jobsModel from "../models/jobs.model.js";
 import { StatusCodes } from "http-status-codes";
 import BadRequestError from "../../errors/bad-request.js";
+import mongoose from "mongoose";
+import moment from "moment";
 
 class JobsController {
   async store(req, res) {
@@ -36,12 +38,44 @@ class JobsController {
   }
 
   async index(req, res) {
-    var jobs = await jobsModel
-      .find({ createdBy: req.user._id })
-      .sort({ createdAt: -1 });
+    const query = { createdBy: req.user._id };
+    const page = req.query.page || 1;
+    const itemsPerPage = 10;
+    const { search, status, jobType, sort } = req.query;
+    if (search) {
+      query.position = { $regex: search, $options: "i" };
+    }
+    if (status && status !== "all") {
+      query.status = status;
+    }
+    if (jobType && jobType !== "all") {
+      query.jobType = jobType;
+    }
+    var sortkey = "";
+    if (sort === "latest") {
+      sortkey = "-createdAt";
+    }
+    if (sort === "oldest") {
+      sortkey = "createdAt";
+    }
+    if (sort === "a-z") {
+      sortkey = "position";
+    }
+    if (sort === "z-a") {
+      sortkey = "-position";
+    }
 
+    const jobs = await jobsModel
+      .find(query)
+      .sort(sortkey)
+      .limit(itemsPerPage)
+      .skip((page - 1) * itemsPerPage);
+    const totalJobs = await jobsModel.find(query).count();
+    const numOfPages = parseInt(totalJobs / itemsPerPage);
     return res.json({
       jobs,
+      totalJobs,
+      numOfPages,
     });
   }
 
@@ -49,14 +83,54 @@ class JobsController {
     return res.json();
   }
   async stats(req, res) {
-    var defaultStats = await jobsModel.aggregate([
-      { $match: { user_id: req.user.id } },
+    var stats = await jobsModel.aggregate([
+      { $match: { createdBy: mongoose.Types.ObjectId(req.user._id) } },
       {
         $group: { _id: "$status", count: { $sum: 1 } },
       },
     ]);
+    stats = stats.reduce((acc, curr) => {
+      const { _id: title, count } = curr;
+      acc[title] = count;
+      return acc;
+    }, {});
+    console.log(stats);
+    var defaultStats = {
+      pending: stats.pending,
+      interview: stats.interview,
+      declined: stats.declined,
+    };
+    var monthlyApplications = await jobsModel.aggregate([
+      { $match: { createdBy: mongoose.Types.ObjectId(req.user._id) } },
+
+      {
+        $group: {
+          _id: {
+            year: { $year: "$createdAt" },
+            month: { $month: "$createdAt" },
+          },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { "_id.year": -1, "_id.month": -1 } },
+      { $limit: 6 },
+    ]);
+    monthlyApplications = monthlyApplications
+      .map((item) => {
+        const {
+          _id: { year, month },
+          count,
+        } = item;
+        const date = moment()
+          .month(month - 1)
+          .year(year)
+          .format("MMM Y");
+        return { date, count };
+      })
+      .reverse();
     return res.send({
       defaultStats,
+      monthlyApplications,
     });
   }
   async show(req, res) {
@@ -109,6 +183,8 @@ class JobsController {
         position: req.body.position,
         company: req.body.company,
         status: req.body.status,
+        jobType: req.body.jobType,
+        jobLocation: req.body.jobLocation,
       },
       { new: true }
     );
